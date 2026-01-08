@@ -1,0 +1,169 @@
+name: Sync honse-farm from git.honse.farm & build images to GHCR
+
+on:
+  schedule:
+    - cron: "0 * * * *"  # hourly, tweak as you like
+  workflow_dispatch:
+
+permissions:
+  contents: write   # we will commit .upstream-commit
+  packages: write   # push to GHCR
+
+env:
+  UPSTREAM_REPO: https://git.honse.farm/astraea/honse-farm.git
+  UPSTREAM_BRANCH: dev
+  REGISTRY: ghcr.io/obscure-crescent
+
+jobs:
+  sync-and-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1) Checkout THIS GitHub repo (with .upstream-commit)
+      - name: Checkout farm-machina (this repo)
+        uses: actions/checkout@v4
+
+      # 2) Read last upstream commit (local copy marker)
+      - name: Read last upstream commit (if any)
+        id: last
+        run: |
+          if [ -f .upstream-commit ]; then
+            LAST=$(cat .upstream-commit | tr -d '\n')
+            echo "Last upstream commit: $LAST"
+            echo "last_commit=$LAST" >> "$GITHUB_OUTPUT"
+          else
+            echo "No previous upstream commit recorded."
+            echo "last_commit=" >> "$GITHUB_OUTPUT"
+          fi
+
+      # 3) Clone upstream and get current HEAD
+      - name: Clone upstream honse-farm (git.honse.farm)
+        run: |
+          set -euo pipefail
+          git clone "$UPSTREAM_REPO" upstream-honse
+          cd upstream-honse
+          git checkout "$UPSTREAM_BRANCH"
+          NEW=$(git rev-parse HEAD)
+          echo "Current upstream dev commit: $NEW"
+          echo "new_commit=$NEW" >> "$GITHUB_OUTPUT"
+        id: upstream
+
+      # 4) Short-circuit if no change
+      - name: Decide whether to build
+        id: decide
+        run: |
+          LAST="${{ steps.last.outputs.last_commit }}"
+          NEW="${{ steps.upstream.outputs.new_commit }}"
+
+          if [ -n "$LAST" ] && [ "$LAST" = "$NEW" ]; then
+            echo "No new upstream commit. Skipping build."
+            echo "build_needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Upstream changed (last='$LAST', new='$NEW'). Will build."
+            echo "build_needed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # 5) Stop here if nothing to do
+      - name: Stop if no build needed
+        if: steps.decide.outputs.build_needed != 'true'
+        run: echo "Done. Nothing changed upstream."
+
+      # 6) Set up buildx & QEMU ONLY if we need to build
+      - name: Set up QEMU
+        if: steps.decide.outputs.build_needed == 'true'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        if: steps.decide.outputs.build_needed == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: steps.decide.outputs.build_needed == 'true'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io \
+            -u "${{ github.actor }}" --password-stdin
+
+      # 7) Find Dockerfiles and build/push images
+      - name: Build & push images
+        if: steps.decide.outputs.build_needed == 'true'
+        run: |
+          set -euo pipefail
+
+          NEW="${{ steps.upstream.outputs.new_commit }}"
+          TAG="${NEW::7}"
+
+          cd upstream-honse
+          git checkout "$UPSTREAM_BRANCH"
+
+          # Find Dockerfiles and variants
+          DOCKERFILES=$(find . -type f \( -name 'Dockerfile' -o -name 'Dockerfile.*' \) | sed 's|^\./||')
+
+          echo "Dockerfiles found:"
+          echo "$DOCKERFILES"
+
+          # For now, just handle known ones explicitly
+          SERVER_DF="HonseFarm.Server/Dockerfile"
+          FILESERVER_DF="HonseFarm.Fileserver/Dockerfile"
+          ADMINPANEL_DF="HonseFarm.Adminpanel/Dockerfile"
+
+          # SERVER (amd64+arm64)
+          if echo "$DOCKERFILES" | grep -q "^${SERVER_DF}$"; then
+            IMAGE="${REGISTRY}/honse-honsefarm.server"
+            docker buildx build \
+              --platform linux/amd64,linux/arm64 \
+              --file "$SERVER_DF" \
+              --tag "${IMAGE}:${TAG}" \
+              --tag "${IMAGE}:dev-latest" \
+              --push \
+              .
+          else
+            echo "WARNING: ${SERVER_DF} not found."
+          fi
+
+          # FILESERVER (amd64+arm64)
+          if echo "$DOCKERFILES" | grep -q "^${FILESERVER_DF}$"; then
+            IMAGE="${REGISTRY}/honse-honsefarm.fileserver"
+            docker buildx build \
+              --platform linux/amd64,linux/arm64 \
+              --file "$FILESERVER_DF" \
+              --tag "${IMAGE}:${TAG}" \
+              --tag "${IMAGE}:dev-latest" \
+              --push \
+              .
+          else
+            echo "WARNING: ${FILESERVER_DF} not found."
+          fi
+
+          # ADMINPANEL (amd64 only, because of Node/QEMU issues)
+          if echo "$DOCKERFILES" | grep -q "^${ADMINPANEL_DF}$"; then
+            IMAGE="${REGISTRY}/honse-honsefarm.adminpanel"
+            docker buildx build \
+              --platform linux/amd64 \
+              --file "$ADMINPANEL_DF" \
+              --tag "${IMAGE}:${TAG}" \
+              --tag "${IMAGE}:dev-latest" \
+              --push \
+              .
+          else
+            echo "WARNING: ${ADMINPANEL_DF} not found."
+          fi
+
+      # 8) Update .upstream-commit and commit it back
+      - name: Update .upstream-commit and push
+        if: steps.decide.outputs.build_needed == 'true'
+        run: |
+          set -euo pipefail
+          NEW="${{ steps.upstream.outputs.new_commit }}"
+
+          echo "$NEW" > .upstream-commit
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add .upstream-commit
+          if git diff --cached --quiet; then
+            echo "No changes to commit (unexpected)."
+          else
+            git commit -m "Sync upstream honse-farm dev at ${NEW}"
+            git push
+          fi
