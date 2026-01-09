@@ -93,11 +93,11 @@ jobs:
           - name: server
             dockerfile: HonseFarm.Server/Dockerfile
             image: honse-honsefarm.server
-            platforms: linux/amd64,linux/arm64,linux/armv7
+            platforms: linux/amd64,linux/arm64
           - name: fileserver
             dockerfile: HonseFarm.Fileserver/Dockerfile
             image: honse-honsefarm.fileserver
-            platforms: linux/amd64,linux/arm64,linux/armv7
+            platforms: linux/amd64,linux/arm64
           - name: adminpanel
             dockerfile: HonseFarm.Adminpanel/Dockerfile
             image: honse-honsefarm.adminpanel
