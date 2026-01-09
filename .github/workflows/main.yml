@@ -1,4 +1,4 @@
-name: Sync honse-farm from git.honse.farm & build images to GHCR
+name: Build honse-farm images to GHCR
 
 on:
   schedule:
