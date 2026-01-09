@@ -110,7 +110,7 @@ jobs:
           if echo "$DOCKERFILES" | grep -q "^${SERVER_DF}$"; then
             IMAGE="${REGISTRY}/honse-honsefarm.server"
             docker buildx build \
-              --platform linux/amd64,linux/arm64 \
+              --platform linux/amd64,linux/arm64,linux/ppc64 \
               --file "$SERVER_DF" \
               --tag "${IMAGE}:${TAG}" \
               --tag "${IMAGE}:dev-latest" \
@@ -124,7 +124,7 @@ jobs:
           if echo "$DOCKERFILES" | grep -q "^${FILESERVER_DF}$"; then
             IMAGE="${REGISTRY}/honse-honsefarm.fileserver"
             docker buildx build \
-              --platform linux/amd64,linux/arm64 \
+              --platform linux/amd64,linux/arm64,linux/ppc64 \
               --file "$FILESERVER_DF" \
               --tag "${IMAGE}:${TAG}" \
               --tag "${IMAGE}:dev-latest" \
