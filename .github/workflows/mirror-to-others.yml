@@ -1,0 +1,69 @@
+name: Mirror GHCR images to Quay
+
+on:
+  workflow_run:
+    workflows: ["Build honse-farm images to GHCR"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+env:
+  GHCR_OWNER: obscure-crescent
+  QUAY_ORG: obscure-crescent
+
+jobs:
+  mirror:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: honse-honsefarm.server
+          - image: honse-honsefarm.fileserver
+          - image: honse-honsefarm.adminpanel
+
+    steps:
+      - name: Checkout (for .upstream-commit)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_branch }}
+
+      - name: Read tag from .upstream-commit
+        id: tag
+        run: |
+          set -euo pipefail
+          if [ ! -f .upstream-commit ]; then
+            echo "Missing .upstream-commit; cannot determine tag."
+            exit 1
+          fi
+          FULL=$(tr -d '\n' < .upstream-commit)
+          echo "full=$FULL" >> "$GITHUB_OUTPUT"
+          echo "tag=${FULL::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Install skopeo
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y skopeo
+
+      - name: Login to Quay
+        run: |
+          skopeo login quay.io \
+            -u "${{ secrets.QUAY_USERNAME }}" \
+            -p "${{ secrets.QUAY_PASSWORD }}"
+
+      - name: Copy ${{ matrix.image }}:${{ steps.tag.outputs.tag }} GHCR -> Quay
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.tag.outputs.tag }}"
+          SRC="docker://ghcr.io/${{ env.GHCR_OWNER }}/${{ matrix.image }}:${TAG}"
+          DST="docker://quay.io/${{ env.QUAY_ORG }}/${{ matrix.image }}:${TAG}"
+          skopeo copy --all "$SRC" "$DST"
+
+      - name: Copy ${{ matrix.image }}:dev-latest GHCR -> Quay
+        run: |
+          set -euo pipefail
+          SRC="docker://ghcr.io/${{ env.GHCR_OWNER }}/${{ matrix.image }}:dev-latest"
+          DST="docker://quay.io/${{ env.QUAY_ORG }}/${{ matrix.image }}:dev-latest"
+          skopeo copy --all "$SRC" "$DST"
