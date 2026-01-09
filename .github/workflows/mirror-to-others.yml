@@ -10,7 +10,7 @@ permissions:
 
 env:
   GHCR_OWNER: obscure-crescent
-  QUAY_ORG: obscure-crescent
+  QUAY_ORG: farminator
 
 jobs:
   mirror:
