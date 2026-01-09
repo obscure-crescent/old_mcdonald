@@ -4,6 +4,7 @@ on:
   workflow_run:
     workflows: ["Build honse-farm images to GHCR"]
     types: [completed]
+  workflow_dispatch:
 
 permissions:
   contents: read
