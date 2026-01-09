@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: "0 * * * *"  # hourly, tweak as you like
   workflow_dispatch:
+    inputs:
+      force_build:
+        description: "Force build even if upstream commit did not change"
+        type: boolean
+        default: false
 
 permissions:
   contents: write   # we will commit .upstream-commit
@@ -15,8 +20,12 @@ env:
   REGISTRY: ghcr.io/obscure-crescent
 
 jobs:
-  sync-and-build:
+  prepare:
     runs-on: ubuntu-latest
+    outputs:
+      build_needed: ${{ steps.decide.outputs.build_needed }}
+      new_commit: ${{ steps.upstream.outputs.new_commit }}
+      tag: ${{ steps.tag.outputs.tag }}
 
     steps:
       # 1) Checkout THIS GitHub repo (with .upstream-commit)
@@ -54,8 +63,12 @@ jobs:
         run: |
           LAST="${{ steps.last.outputs.last_commit }}"
           NEW="${{ steps.upstream.outputs.new_commit }}"
+          FORCE="${{ inputs.force_build }}"
 
-          if [ -n "$LAST" ] && [ "$LAST" = "$NEW" ]; then
+          if [ "$FORCE" = "true" ]; then
+            echo "Force build requested."
+            echo "build_needed=true" >> "$GITHUB_OUTPUT"
+          elif [ -n "$LAST" ] && [ "$LAST" = "$NEW" ]; then
             echo "No new upstream commit. Skipping build."
             echo "build_needed=false" >> "$GITHUB_OUTPUT"
           else
@@ -63,97 +76,90 @@ jobs:
             echo "build_needed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      # 5) Stop here if nothing to do
-      - name: Stop if no build needed
-        if: steps.decide.outputs.build_needed != 'true'
-        run: echo "Done. Nothing changed upstream."
+      - name: Set image tag
+        id: tag
+        run: |
+          NEW="${{ steps.upstream.outputs.new_commit }}"
+          echo "tag=${NEW::7}" >> "$GITHUB_OUTPUT"
 
-      # 6) Set up buildx & QEMU ONLY if we need to build
+  build-images:
+    needs: prepare
+    if: needs.prepare.outputs.build_needed == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: server
+            dockerfile: HonseFarm.Server/Dockerfile
+            image: honse-honsefarm.server
+            platforms: linux/amd64,linux/arm64,linux/ppc64
+          - name: fileserver
+            dockerfile: HonseFarm.Fileserver/Dockerfile
+            image: honse-honsefarm.fileserver
+            platforms: linux/amd64,linux/arm64,linux/ppc64
+          - name: adminpanel
+            dockerfile: HonseFarm.Adminpanel/Dockerfile
+            image: honse-honsefarm.adminpanel
+            platforms: linux/amd64
+
+    steps:
+      - name: Clone upstream honse-farm (git.honse.farm)
+        run: |
+          set -euo pipefail
+          git clone "$UPSTREAM_REPO" upstream-honse
+          cd upstream-honse
+          git checkout "$UPSTREAM_BRANCH"
+
+      # Set up buildx & QEMU ONLY if we need to build
       - name: Set up QEMU
-        if: steps.decide.outputs.build_needed == 'true'
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Buildx
-        if: steps.decide.outputs.build_needed == 'true'
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
-        if: steps.decide.outputs.build_needed == 'true'
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io \
             -u "${{ github.actor }}" --password-stdin
 
-      # 7) Find Dockerfiles and build/push images
-      - name: Build & push images
-        if: steps.decide.outputs.build_needed == 'true'
+      - name: Build & push ${{ matrix.name }}
         run: |
           set -euo pipefail
 
-          NEW="${{ steps.upstream.outputs.new_commit }}"
-          TAG="${NEW::7}"
+          TAG="${{ needs.prepare.outputs.tag }}"
+          DOCKERFILE="${{ matrix.dockerfile }}"
+          IMAGE="${REGISTRY}/${{ matrix.image }}"
 
           cd upstream-honse
           git checkout "$UPSTREAM_BRANCH"
 
-          # Find Dockerfiles and variants
-          DOCKERFILES=$(find . -type f \( -name 'Dockerfile' -o -name 'Dockerfile.*' \) | sed 's|^\./||')
-
-          echo "Dockerfiles found:"
-          echo "$DOCKERFILES"
-
-          # For now, just handle known ones explicitly
-          SERVER_DF="HonseFarm.Server/Dockerfile"
-          FILESERVER_DF="HonseFarm.Fileserver/Dockerfile"
-          ADMINPANEL_DF="HonseFarm.Adminpanel/Dockerfile"
-
-          # SERVER (amd64+arm64)
-          if echo "$DOCKERFILES" | grep -q "^${SERVER_DF}$"; then
-            IMAGE="${REGISTRY}/honse-honsefarm.server"
-            docker buildx build \
-              --platform linux/amd64,linux/arm64,linux/ppc64 \
-              --file "$SERVER_DF" \
-              --tag "${IMAGE}:${TAG}" \
-              --tag "${IMAGE}:dev-latest" \
-              --push \
-              .
-          else
-            echo "WARNING: ${SERVER_DF} not found."
+          if [ ! -f "$DOCKERFILE" ]; then
+            echo "WARNING: ${DOCKERFILE} not found. Skipping."
+            exit 0
           fi
 
-          # FILESERVER (amd64+arm64)
-          if echo "$DOCKERFILES" | grep -q "^${FILESERVER_DF}$"; then
-            IMAGE="${REGISTRY}/honse-honsefarm.fileserver"
-            docker buildx build \
-              --platform linux/amd64,linux/arm64,linux/ppc64 \
-              --file "$FILESERVER_DF" \
-              --tag "${IMAGE}:${TAG}" \
-              --tag "${IMAGE}:dev-latest" \
-              --push \
-              .
-          else
-            echo "WARNING: ${FILESERVER_DF} not found."
-          fi
-
-          # ADMINPANEL (amd64 only, because of Node/QEMU issues)
-          if echo "$DOCKERFILES" | grep -q "^${ADMINPANEL_DF}$"; then
-            IMAGE="${REGISTRY}/honse-honsefarm.adminpanel"
-            docker buildx build \
-              --platform linux/amd64 \
-              --file "$ADMINPANEL_DF" \
-              --tag "${IMAGE}:${TAG}" \
-              --tag "${IMAGE}:dev-latest" \
-              --push \
-              .
-          else
-            echo "WARNING: ${ADMINPANEL_DF} not found."
-          fi
+          docker buildx build \
+            --platform "${{ matrix.platforms }}" \
+            --file "$DOCKERFILE" \
+            --tag "${IMAGE}:${TAG}" \
+            --tag "${IMAGE}:dev-latest" \
+            --push \
+            .
 
       # 8) Update .upstream-commit and commit it back
+  record-upstream:
+    needs: [prepare, build-images]
+    if: needs.prepare.outputs.build_needed == 'true' && success()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout farm-machina (this repo)
+        uses: actions/checkout@v4
+
       - name: Update .upstream-commit and push
-        if: steps.decide.outputs.build_needed == 'true'
         run: |
           set -euo pipefail
-          NEW="${{ steps.upstream.outputs.new_commit }}"
+          NEW="${{ needs.prepare.outputs.new_commit }}"
 
           echo "$NEW" > .upstream-commit
 
