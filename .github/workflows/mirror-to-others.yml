@@ -1,4 +1,4 @@
-name: Mirror GHCR images to Quay
+name: Mirror GHCR images to Quay + Docker Hub
 
 on:
   workflow_run:
@@ -20,6 +20,15 @@ on:
         type: boolean
         required: false
         default: true
+      target:
+        description: "Where to mirror images"
+        type: choice
+        required: false
+        default: "both"
+        options:
+          - both
+          - quay
+          - dockerhub
 
 permissions:
   contents: read
@@ -27,23 +36,34 @@ permissions:
 env:
   GHCR_OWNER: obscure-crescent
   QUAY_ORG: farminator
+  DOCKERHUB_NAMESPACE: iferniton
 
 jobs:
   mirror:
-    # Allow manual runs, or workflow_run success
     if: >-
       ${{
         github.event_name == 'workflow_dispatch' ||
         github.event.workflow_run.conclusion == 'success'
       }}
     runs-on: ubuntu-latest
+
     strategy:
       fail-fast: false
       matrix:
         include:
-          - image: honse-honsefarm.server
-          - image: honse-honsefarm.fileserver
-          - image: honse-honsefarm.adminpanel
+          # Each entry defines:
+          # - src: GHCR image name
+          # - quay: Quay repo name
+          # - dh: Docker Hub repo name
+          - src: honse-honsefarm.server
+            quay: honse-honsefarm.server
+            dh: honsefarm.server
+          - src: honse-honsefarm.fileserver
+            quay: honse-honsefarm.fileserver
+            dh: honsefarm.fileserver
+          - src: honse-honsefarm.adminpanel
+            quay: honse-honsefarm.adminpanel
+            dh: honsefarm.adminpanel
 
     steps:
       - name: Decide checkout ref
@@ -66,7 +86,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # If provided manually, use it.
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
             T="${{ inputs.tag }}"
             echo "Using manually provided tag: $T"
@@ -74,7 +93,6 @@ jobs:
             exit 0
           fi
 
-          # Otherwise, read from .upstream-commit
           if [ ! -f .upstream-commit ]; then
             echo "Missing .upstream-commit; cannot determine tag."
             exit 1
@@ -93,35 +111,66 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y skopeo
 
-      - name: Sanity-check Quay credentials (non-fatal)
-        run: |
-          set -euo pipefail
-          echo "Quay user: ${{ secrets.QUAY_USERNAME }}"
-          # This will fail if repo doesn't exist yet; that's OK.
-          skopeo inspect \
-            --creds "${{ secrets.QUAY_USERNAME }}:${{ secrets.QUAY_PASSWORD }}" \
-            "docker://quay.io/${{ env.QUAY_ORG }}/${{ matrix.image }}:dev-latest" || true
-
-      - name: Mirror tag ${{ steps.tag.outputs.tag }} GHCR -> Quay
+      # -------------------------
+      # Quay mirror
+      # -------------------------
+      - name: Mirror tag to Quay
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.target == 'both' || inputs.target == 'quay' }}
         run: |
           set -euo pipefail
           TAG="${{ steps.tag.outputs.tag }}"
-          SRC="docker://ghcr.io/${{ env.GHCR_OWNER }}/${{ matrix.image }}:${TAG}"
-          DST="docker://quay.io/${{ env.QUAY_ORG }}/${{ matrix.image }}:${TAG}"
+          SRC="docker://ghcr.io/${{ env.GHCR_OWNER }}/${{ matrix.src }}:${TAG}"
+          DST="docker://quay.io/${{ env.QUAY_ORG }}/${{ matrix.quay }}:${TAG}"
 
           echo "Copying $SRC -> $DST"
           skopeo copy --all --retry-times 5 \
             --dest-creds "${{ secrets.QUAY_USERNAME }}:${{ secrets.QUAY_PASSWORD }}" \
             "$SRC" "$DST"
 
-      - name: Mirror dev-latest GHCR -> Quay
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.mirror_dev_latest }}
+      - name: Mirror dev-latest to Quay
+        if: >-
+          ${{
+            (github.event_name != 'workflow_dispatch' || inputs.mirror_dev_latest) &&
+            (github.event_name != 'workflow_dispatch' || inputs.target == 'both' || inputs.target == 'quay')
+          }}
         run: |
           set -euo pipefail
-          SRC="docker://ghcr.io/${{ env.GHCR_OWNER }}/${{ matrix.image }}:dev-latest"
-          DST="docker://quay.io/${{ env.QUAY_ORG }}/${{ matrix.image }}:dev-latest"
+          SRC="docker://ghcr.io/${{ env.GHCR_OWNER }}/${{ matrix.src }}:dev-latest"
+          DST="docker://quay.io/${{ env.QUAY_ORG }}/${{ matrix.quay }}:dev-latest"
 
           echo "Copying $SRC -> $DST"
           skopeo copy --all --retry-times 5 \
             --dest-creds "${{ secrets.QUAY_USERNAME }}:${{ secrets.QUAY_PASSWORD }}" \
+            "$SRC" "$DST"
+
+      # -------------------------
+      # Docker Hub mirror
+      # -------------------------
+      - name: Mirror tag to Docker Hub
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.target == 'both' || inputs.target == 'dockerhub' }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.tag.outputs.tag }}"
+          SRC="docker://ghcr.io/${{ env.GHCR_OWNER }}/${{ matrix.src }}:${TAG}"
+          DST="docker://docker.io/${{ env.DOCKERHUB_NAMESPACE }}/${{ matrix.dh }}:${TAG}"
+
+          echo "Copying $SRC -> $DST"
+          skopeo copy --all --retry-times 5 \
+            --dest-creds "${{ secrets.DOCKERHUB_USERNAME }}:${{ secrets.DOCKERHUB_PASSWORD }}" \
+            "$SRC" "$DST"
+
+      - name: Mirror dev-latest to Docker Hub
+        if: >-
+          ${{
+            (github.event_name != 'workflow_dispatch' || inputs.mirror_dev_latest) &&
+            (github.event_name != 'workflow_dispatch' || inputs.target == 'both' || inputs.target == 'dockerhub')
+          }}
+        run: |
+          set -euo pipefail
+          SRC="docker://ghcr.io/${{ env.GHCR_OWNER }}/${{ matrix.src }}:dev-latest"
+          DST="docker://docker.io/${{ env.DOCKERHUB_NAMESPACE }}/${{ matrix.dh }}:dev-latest"
+
+          echo "Copying $SRC -> $DST"
+          skopeo copy --all --retry-times 5 \
+            --dest-creds "${{ secrets.DOCKERHUB_USERNAME }}:${{ secrets.DOCKERHUB_PASSWORD }}" \
             "$SRC" "$DST"
