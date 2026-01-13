@@ -16,7 +16,7 @@ permissions:
 
 env:
   UPSTREAM_REPO: https://git.honse.farm/astraea/honse-farm.git
-  UPSTREAM_BRANCH: dev
+  UPSTREAM_BRANCH: main
   REGISTRY: ghcr.io/obscure-crescent
 
 jobs:
@@ -144,6 +144,7 @@ jobs:
             --file "$DOCKERFILE" \
             --tag "${IMAGE}:${TAG}" \
             --tag "${IMAGE}:dev-latest" \
+            --tag "${IMAGE}:latest" \
             --push \
             .
 
